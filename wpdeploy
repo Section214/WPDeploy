@@ -1,0 +1,329 @@
+#!/bin/bash
+#
+# WPDeploy - A WordPress development environment tool
+#
+# Copyright (c) 2014, Daniel J Griffiths <dgriffiths@section214.com>
+# 
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+# MA 02110-1301, USA.
+
+############################################################
+# Configure stuff                                          #
+############################################################
+NAME=$(basename "$0")
+LONGNAME="WordPress Development Environment Tool"
+VER="0.1"
+
+BOLD=`tput bold`
+NORMAL=`tput sgr0`
+
+############################################################
+# Helper functions                                         #
+############################################################
+ask() { (printf '    \033[01;33m->\033[00m '; echo -e "$* \c") > /dev/stderr; }
+notice() { (printf ' \033[01;34m::\033[00m '; echo -e "$*") > /dev/stderr; }
+warn() { (printf ' \033[01;33m::\033[00m '; echo -e "$*") > /dev/stderr; }
+error() { (printf ' \033[01;31m::\033[00m '; echo -e "$*") > /dev/stderr; }
+info() { (printf '    \033[01;33m->\033[00m '; echo -e "$*") > /dev/stderr; }
+dryrun() { (printf '    \033[01;32m->\033[00m '; echo -e "$*") > /dev/stderr; }
+success() { (printf ' \033[01;32m::\033[00m '; echo -e "$*") > /dev/stderr; }
+exiterror() { sleep 1; exit 1; }
+
+yesno() {
+    read YESNO
+    case "${YESNO}" in
+        [Yy]|[Yy][Ee][Ss]|[Tt][Rr][Uu][Ee]|[Oo][Nn]|1) return 0;;
+        [Nn]|[Nn][Oo]|[Ff][Aa][Ll][Ss][Ee]|[Oo][Ff][Ff]|0) return 1;;
+        *) return 1;;
+    esac
+}
+
+
+############################################################
+# Display version and exit                                 #
+############################################################
+version() {
+    echo "${LONGNAME} v${VER}"
+}
+
+
+############################################################
+# Display usage information                                #
+############################################################
+usage() {
+    version
+    echo "Usage: ${NAME} <name> [OPTION]"
+    echo "Deploy a WordPress development environment quickly."
+    echo
+    echo "  -c, --current-dir     bypass directory check and create in current directory"
+    echo "  -f, --force           remove existing files and database before deployment"
+    echo "  -u, --user            the user to assign for the current deployment"
+    echo "  -g, --group           the group to assign for the current deployment"
+    echo "  -h, --help            display this help and exit"
+    echo "  -v, --version         output version information and exit"
+    echo
+    echo "If no user is specified, defaults to current user."
+    echo "If no group is specified, defaults to same as user."
+    echo
+    echo "Report ${NAME} bugs: <https://github.com/Section214/WPDeploy/issues>"
+}
+
+
+############################################################
+# Salt generator                                           #
+############################################################
+saltgen() {
+    cat /dev/urandom | tr -dc '[:alnum:]' | fold -w 64 | head -n 1
+}
+
+
+############################################################
+# Setup new dev site                                       #
+############################################################
+deploy() {
+    version
+
+    if [[ ! -f "${HOME}/.wpdeploy" ]]; then
+        notice "Warning: WPDeploy config file not found!"
+
+        info "WPDeploy creates databases based on a standardized prefix."
+        info "Enter your preferred prefix, or leave blank to use the default 'wpdeploy' prefix."
+        ask "Database prefix:"
+        read PREFIX
+
+        if [[ -z ${PREFIX} ]]; then
+            notice "Database prefix set to wpdeploy."
+            PREFIX="wpdeploy"
+        fi
+
+        while [[ -z ${SQLUSER} ]]; do
+            ask "Enter MySQL username:"
+            read SQLUSER
+
+            if [[ -z ${SQLUSER} ]]; then
+                error "MySQL username is required!"
+            fi
+        done
+
+        notice "Storing your MySQL password is optional."
+        notice "Leave it blank to be prompted at runtime or enter {blank} for no password."
+        ask "Enter MySQL password:"
+        read SQLPASS
+
+        echo "#!/bin/bash
+#
+# WPDeploy configuration file
+
+# Database prefix
+PREFIX=\"${PREFIX}\"
+
+# MySQL username
+SQLUSER=\"${SQLUSER}\"
+
+# MySQL password
+SQLPASS=\"${SQLPASS}\"" > ${HOME}/.wpdeploy
+
+        success "Configuration file created successfully!"
+    else
+        source ${HOME}/.wpdeploy
+    fi
+
+    if [[ ! -w . ]]; then
+        error "Your user does not have permissions to this directory!"
+        notice "Exiting."
+        exiterror
+    fi
+
+    if [[ -z ${SITENAME} ]]; then
+        error "Site name is required!"
+        notice "Exiting."
+        exiterror
+    fi
+
+    if [[ ! -z ${FORCE} ]]; then
+        warn "The force option can not be undone!"
+        ask "Remove the specified directory and the ${PREFIX}_${SITENAME} database? [y/N]"
+        CONFIRM=`yesno`
+
+        if [[ $? == 1 ]]; then
+            error "Aborted by user."
+            notice "Exiting."
+            exiterror
+        fi
+
+        if [[ -z ${CURRENT} ]]; then
+            if [[ -d ${SITENAME} ]]; then
+                rm -Rf ${SITENAME}
+            fi
+        else
+            rm -Rf *
+        fi
+    
+        if [[ ${SQLPASS} == "{blank}" ]]; then
+            mysql -u ${SQLUSER} -e "drop database ${PREFIX}_${SITENAME}" > /dev/null 2>&1
+        else
+            mysql -u ${SQLUSER} -p"${SQLPASS}" -e "drop database ${PREFIX}_${SITENAME}" > /dev/null 2>&1
+        fi
+    fi
+
+    if [[ -z ${CURRENT} ]]; then
+        if [[ -d ${SITENAME} ]]; then
+            error "Site '${SITENAME}' already exists!"
+            notice "Exiting."
+            exiterror
+        fi
+        
+        mkdir ${SITENAME}
+        cd ${SITENAME}
+    else
+        if [[ -f wp-config-sample.php ]]; then
+            error "WordPress is already installed in this directory!"
+            notice "Exiting."
+            exiterror
+        fi
+    fi
+
+    if [[ ${SQLPASS} == "{blank}" ]]; then
+        DBCHECK=`mysql -u ${SQLUSER} --skip-column-names -e "show databases like '${PREFIX}_${SITENAME}'" > /dev/null 2>&1`
+    else
+        DBCHECK=`mysql -u ${SQLUSER} -p"${SQLPASS}" --skip-column-names -e "show databases like '${PREFIX}_${SITENAME}'" > /dev/null 2>&1`
+    fi
+
+    if [[ ${DBCHECK} == "${PREFIX}_${SITENAME}" ]]; then
+        error "The specified database already exists!"
+        notice "Exiting."
+        exiterror
+    fi
+
+    if [[ -z ${USER} ]]; then
+        USER=`whoami`
+    fi
+
+    if [[ -z ${GROUP} ]]; then
+        GROUP=${USER}
+    fi
+
+    notice "Download latest WordPress..."
+    curl --progress-bar -ko latest.tar.gz https://wordpress.org/latest.tar.gz;
+
+    notice "Extracting WordPress..."
+    tar -xf latest.tar.gz > /dev/null 2>&1
+
+    if [[ $? != 0 ]]; then
+        error "WordPress archive appears to be corrupt!"
+        
+        notice "Cleaning up..."
+        rm -f latest.tar.gz
+
+        notice "Exiting."
+        exiterror
+    fi
+
+    mv wordpress/* .
+
+    notice "Setting permissions..."
+    chown -R ${USER}:${GROUP} *
+
+    notice "Creating database..."
+    if [[ ${SQLPASS} == "{blank}" ]]; then
+        mysql -u ${SQLUSER} -e "create database ${PREFIX}_${SITENAME}" > /dev/null 2>&1
+    else
+        mysql -u ${SQLUSER} -p"${SQLPASS}" -e "create database ${PREFIX}_${SITENAME}" > /dev/null 2>&1
+    fi
+
+    if [[ $? != 0 ]]; then
+        error "Database creation failed!"
+
+        notice "Cleaning up..."
+        if [[ ${CURRENT} == 1 ]]; then
+            rm -Rf *
+        else
+            cd ..
+            rm -Rf ${SITENAME}
+        fi
+
+        notice "Exiting."
+        exiterror
+    fi
+
+    notice "Configuring WordPress..."
+    cp wp-config-sample.php wp-config.php
+    sed -i "s|database_name_here|${PREFIX}_${SITENAME}|" wp-config.php
+    sed -i "s|username_here|${SQLUSER}|" wp-config.php
+    sed -i "s|password_here|${SQLPASS}|" wp-config.php
+
+    SALTS=0
+
+    while [[ ${SALTS} -eq 0 ]]; do
+        sed -i "0,/put your unique phrase here/s//`saltgen`/" wp-config.php
+    
+        grep -q "put your unique phrase here" wp-config.php
+        if [[ $? == 1 ]]; then
+            SALTS=1
+        fi
+    done
+
+    ask "Enable debug mode? [y/N]"
+    CONFIRM=`yesno`
+
+    if [[ $? == 0 ]]; then
+        sed -i  "s|'WP_DEBUG', false|'WP_DEBUG', true|" wp-config.php
+    fi
+
+    notice "Cleaning up..."
+    rm -Rf wordpress latest.tar.gz
+
+    success "Done!"
+}
+
+
+############################################################
+# Go, dev go!                                              #
+############################################################
+while [ "$#" -ne "0" ]; do
+    case "$1" in
+        '-c'|'--current-dir')
+            CURRENT=1
+            ;;
+        '-f'|'--force')
+            FORCE=1
+            ;;
+        '-u'|'--user')
+            USER=${2}
+            shift
+            ;;
+        '-g'|'--group')
+            GROUP=${2}
+            shift
+            ;;
+        '-h'|'--help')
+            usage
+            exit 0
+            ;;
+        '-v'|'--version')
+            version
+            exit 0
+            ;;
+        *)
+            SITENAME=${1}
+            ;;
+    esac
+
+    shift
+done
+
+deploy
+
+exit 0
